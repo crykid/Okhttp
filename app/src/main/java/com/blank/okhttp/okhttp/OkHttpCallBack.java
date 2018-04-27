@@ -35,6 +35,7 @@ public abstract class OkHttpCallBack<T> {
 
     /**
      * 请求被取消的回调
+     *
      * @param url
      */
     public void onCancel(String url) {
@@ -42,7 +43,9 @@ public abstract class OkHttpCallBack<T> {
     }
 
     public void onFailure(Call call, Exception e) {
+        //TODO:可以弹窗
 
+        Log.d(TAG, "onFailure: " + e.toString());
     }
 
     public void onSuccess(T response) {

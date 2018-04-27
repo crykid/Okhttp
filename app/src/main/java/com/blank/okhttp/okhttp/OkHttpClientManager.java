@@ -2,6 +2,8 @@ package com.blank.okhttp.okhttp;
 
 import android.net.Uri;
 import android.os.Handler;
+import android.os.Looper;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.blank.okhttp.ErrorCode.ErrorCode;
@@ -9,6 +11,8 @@ import com.google.gson.Gson;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -28,16 +32,26 @@ import static com.blank.okhttp.api.API.BASEURL;
 
 public class OkHttpClientManager {
     private static final String TAG = "OkHttpClientManager";
-    private static OkHttpClientManager mInstance;
+    private static volatile OkHttpClientManager mInstance;
     private OkHttpClient mOkHttpClient;
+    private List<RequestUrl> delayUrlList = new ArrayList<>();
     private Gson mGson;
     private Handler mRequestHandler;
+    /**
+     * 重复请求拦截间隔
+     */
+    private final static int FILTERURL_PEROID_SECOND = 1000;
+    /**
+     * 重复请求不拦截标志，在请求的param中加入
+     */
+    public final static String FILTERURL_KEY = "intercept";
 
 
     private OkHttpClientManager() {
         if (mOkHttpClient == null) {
             mOkHttpClient = new OkHttpClient();
         }
+        mRequestHandler = new Handler(Looper.getMainLooper());
         mOkHttpClient.newBuilder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).writeTimeout(5, TimeUnit.SECONDS);
         mGson = new Gson();
     }
@@ -86,6 +100,54 @@ public class OkHttpClientManager {
         deliveryResult(request, callBack);
     }
 
+    /**
+     * 重复请求拦截
+     *
+     * @param url   此次请求的url
+     * @param param 此次请求的参数
+     * @return
+     */
+    private boolean filterUrl(String url, Map param) {
+        long timeStamp = System.currentTimeMillis() - FILTERURL_PEROID_SECOND;
+
+        //TODO:这部分代码待修改
+        StringBuffer sb = new StringBuffer(url);
+
+        //得到完整的url
+        if (param != null && param.size() > 0) {
+            if (param.get("r") != null) {
+                param.remove("r");
+                return false;
+            }
+            sb.append(getUrl(url, param));
+        }
+
+        synchronized ("") {
+            //遍历需请求拦截的url泪飙，将所有不需要拦截的url添加到待移除列表（deleteList）中
+            if (delayUrlList != null && delayUrlList.size() > 0) {
+                List<RequestUrl> deleteList = new ArrayList<>();
+                for (RequestUrl p : deleteList) {
+                    if (p.firstCreateTime < timeStamp) {
+                        deleteList.add(p);
+                    }
+                }
+                //将待移除的url从延迟列表中移除；
+                delayUrlList.removeAll(deleteList);
+
+                //如果延迟列表中仍然包含此次请求，则返回需要拦截
+                for (RequestUrl p : deleteList) {
+                    if (p.url.equals(sb.toString())) {
+                        return true;
+                    }
+                }
+            }
+            //将此次请求url添加到拦截列表中
+            delayUrlList.add(new RequestUrl(sb.toString(), System.currentTimeMillis()));
+
+        }
+        return false;
+    }
+
     private Request buildPostRequest(String url, Param[] params) {
         if (params == null) {
             params = new Param[0];
@@ -113,31 +175,46 @@ public class OkHttpClientManager {
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
-                String jsonResponse = response.body().string();
+                final String jsonResponse = response.body().string();
                 Log.w(TAG, "onResponse ==> url: " + request.url() + "  jsonString : " + jsonResponse);
-                Object jsonobj = mGson.fromJson(jsonResponse, callback.mType);
-                int code = (int) getFieldValueByName("errorCode", jsonobj);
+                final Object jsonobj = mGson.fromJson(jsonResponse, callback.mType);
+                final int code = (int) getFieldValueByName("errorCode", jsonobj);
 
-                checkErrorType(code);
-                Log.w(TAG, "onResponse: error_code: " + code);
-//                callback.onSuccess(jsonobj);
+                String errmsg = checkErrorType(code);
+                if (!TextUtils.isEmpty(errmsg)) {
+                    callback.onFailure(call, new Exception(errmsg));
+                } else {
+                    mRequestHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            callback.onSuccess(jsonobj);
+                            Log.d(TAG, "onResponse: >>> " + code + "  " + jsonResponse);
+                        }
+                    });
 
+                }
 
             }
         });
     }
 
-    private void checkErrorType(int code) {
-        for (int key : ErrorCode.errorMsg.keySet()) {
-            if (key == code) {
-                Log.w(TAG, "checkErrorType: errorType: " + ErrorCode.errorMsg.get(key));
-                return;
+    private String checkErrorType(int code) {
+        if (code > 0) {
+            for (int key : ErrorCode.errorMsg.keySet()) {
+                if (key == code) {
+                    Log.w(TAG, "checkErrorType: errorType: " + ErrorCode.errorMsg.get(key));
+                    return ErrorCode.errorMsg.get(key);
+                }
+
             }
+            return "";
         }
+        return "";
     }
 
     /**
      * 将base url与传入的参数拼接后的url进行再拼接，（此处的baseurl为""）；
+     *
      * @param url
      * @param params
      * @return
@@ -225,6 +302,16 @@ public class OkHttpClientManager {
         public Param(String key, String s) {
             this.key = key;
             this.value = s;
+        }
+    }
+
+    class RequestUrl {
+        String url;
+        long firstCreateTime;
+
+        public RequestUrl(String url, long firstCreateTime) {
+            this.url = url;
+            this.firstCreateTime = firstCreateTime;
         }
     }
 
